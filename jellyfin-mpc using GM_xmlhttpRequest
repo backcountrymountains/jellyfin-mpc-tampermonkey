@@ -1,0 +1,415 @@
+// ==UserScript==
+// @name         Jellyfin with Potplayer
+// @version      0.1
+// @description  play video with Potplayer
+// @author       Tccoin
+// @grant GM_xmlhttpRequest
+// @grant GM.fetch
+// @match        http://192.168.x.x/web/index.html*
+// @match        http://localhost:8096/web/index.html*
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    //Jellyfin Username:
+    let username = "USERNAME";
+    //Jellyfin Password:
+    let password = "PASSWORD";
+
+    let jellyfinUrl = window.location.host
+    
+    let openPotplayer = async (itemid) => {
+        let userid = (await ApiClient.getCurrentUser()).Id;
+        ApiClient.getItem(userid, itemid).then(r => {
+            if (r.Path) {
+                let path = r.Path.replace(/\\/g, '/');
+                path = path.replace('\/mnt\/d', 'D:');
+                console.log(path);
+                //console.log(r);
+                let progress = r.UserData.PlayedPercentage;
+                let playedTime = msToTime(r.UserData.PlaybackPositionTicks/10000);
+                console.log("Jellyfin reported percent: " + progress);
+                console.log("Jellyfin reported played time: " + playedTime);
+                let durl = ApiClient.getItemDownloadUrl(itemid);
+                console.log(durl);
+                let encodedPath = encodeURIComponent(path);
+                
+                
+                // Open in MPC-HC
+                const xhr = new XMLHttpRequest();
+                //xhr.open("GET", 'http://localhost:13579/browser.html?path=' + encodedPath);
+                //xhr.send();
+
+                //Set Progress in MPC-HC
+                //setTimeout( function() {xhr.open("GET", 'http://localhost:13579/command.html?wm_command=-1&percent=' + progress); xhr.send();}, 2500);
+                setTimeout( function() {xhr.open("GET", 'http://localhost:13579/command.html?wm_command=-1&position=' + playedTime); xhr.send();}, 3000);
+                xhr.onload = function() {
+                    if (xhr.status === 200) {
+                        console.log("MPC-HC Received PlayTime Request");
+                    } else if (xhr.status === 404) {
+                    }
+                };
+
+                function msToTime(s) {
+                    var ms = s % 1000;
+                    s = (s - ms) / 1000;
+                    var secs = s % 60;
+                    s = (s - secs) / 60;
+                    var mins = s % 60;
+                    var hrs = (s - mins) / 60;
+
+                    return ('0'+hrs).substr(-2) + ':' + ('0'+mins).substr(-2) + ':' + ('0'+secs).substr(-2) + '.' + ms;
+                }
+
+                //        Post Data to Jellyfin
+                async function postData(url = '', headers = '', data = {}, method = '') {
+                    // Default options are marked with *
+                    const response = await fetch(url, {
+                        method: 'POST', // *GET, POST, PUT, DELETE, etc.
+                        mode: 'cors', // no-cors, *cors, same-origin
+                        cache: 'no-cache', // *default, no-cache, reload, force-cache, only-if-cached
+                        credentials: 'omit', // include, *same-origin, omit
+                        headers: headers,
+                        redirect: 'follow', // manual, *follow, error
+                        referrerPolicy: 'no-referrer', // no-referrer, *no-referrer-when-downgrade, origin, origin-when-cross-origin, same-origin, strict-origin, strict-origin-when-cross-origin, unsafe-url
+                        body: JSON.stringify(data) // body data type must match "Content-Type" header
+                    });
+                    return response;
+                };
+
+                async function main() {
+                    let authData = {
+                        "Username": username,
+                        "Pw": password
+                    };
+
+                    // Get authorization
+                    let authUrl = "http://" + jellyfinUrl + "/Users/AuthenticateByName";
+                    let authHeaders = {
+                        'Content-Type': 'application/json',
+                        'X-Emby-Authorization': `MediaBrowser Client="Jellyfin Web", Device="Monkey", DeviceId="34098154309854132098", Version="10.8.8"`
+                    };
+                    let result = await postData(authUrl, authHeaders, authData, 'POST');
+                    result = await result.json();
+                    let accessToken = result.AccessToken;
+
+                    // Start Playing
+                    let playUrl = "http://" + jellyfinUrl + "/Users/" + userid + "/PlayingItems/" + itemid;
+                    let playHeaders = {
+                        'Content-Type': 'application/json',
+                        'X-Emby-Authorization': `MediaBrowser Client="Jellyfin Web", Device="Monkey", DeviceId="34098154309854132098", Version="10.8.8"`,
+                        'x-mediabrowser-token': accessToken
+                    }
+                    let playData = {
+                        "mediaSourceId": itemid,
+                        "audioStreamIndex": 1,
+                        "subtitleStreamIndex": 0,
+                        "playMethod": "DirectStream",
+                        "playSessionId": 83837459283798792,
+                        "canSeek": true
+                    };
+                    result = await postData(playUrl, playHeaders, playData, 'POST');
+
+                    // Send Progress back to jellyfin from MPC
+                    async function setJellyfinProgress(positionTicks) {
+                        // NOOOOOOOOO: let progressUrl = "http://localhost:8096/Users/" + userid + "/PlayingItems/" + itemid + "/Progress";
+                        let progressUrl = "http://" + jellyfinUrl + "/Sessions/Playing/Progress";
+                        let progressHeaders = {
+                            'Content-Type': 'application/json',
+                            'X-Emby-Authorization': `MediaBrowser Client="Jellyfin Web", Device="Monkey", DeviceId="34098154309854132098", Version="10.8.8"`,
+                            'x-mediabrowser-token': accessToken
+                        }
+                        let progressData = {
+                            "VolumeLevel": 100,
+                            "IsMuted": false,
+                            "IsPaused": isPaused,
+                            "RepeatMode": "RepeatNone",
+                            "ShuffleMode": "Sorted",
+                            "MaxStreamingBitrate": 140000000,
+                            "PositionTicks": positionTicks,
+                            "PlaybackStartTimeTicks": 16735652935220000,
+                            "PlaybackRate": 1,
+                            "SubtitleStreamIndex": -1,
+                            "AudioStreamIndex": 1,
+                            "CanSeek": true,
+                            "ItemId": itemid,
+                            "EventName": "timeupdate"
+
+                        };
+
+                        postData(progressUrl, progressHeaders, progressData)
+
+                    };
+                    let mpcProgress = [];
+                    let positionTicks = 0;
+
+                    const callTasks = () => stopPlaying()
+                    .then(logOut)
+                    .catch(console.error);
+
+                    async function stopPlaying(){
+                        let playUrl = "http://" + jellyfinUrl + "/Sessions/Playing/Stopped";
+                        let playHeaders = {
+                            'Content-Type': 'application/json',
+                            'X-Emby-Authorization': `MediaBrowser Client="Jellyfin Web", Device="Monkey", DeviceId="34098154309854132098", Version="10.8.8"`,
+                            'x-mediabrowser-token': accessToken
+                        }
+                        let playData = {
+                            "mediaSourceId": itemid,
+                            "ItemId": itemid,
+                            "audioStreamIndex": 1,
+                            "subtitleStreamIndex": 0,
+                            "PlayMethod": "DirectStream",
+                            "PlaySessionId": 83837459283798792,
+                            "PlaylistItemId": "playlistItem0",
+                            "PositionTicks": positionTicks,
+                            "canSeek": true
+                        };
+                        result = await postData(playUrl, playHeaders, playData, 'DELETE');
+                        console.log("Stop Playing");
+                        console.log(result);
+                        //console.log(ApiClient.getSessions());
+                    }
+
+                    async function logOut(){
+                        let logOutUrl = "http://" + jellyfinUrl + "/Sessions/Logout";
+                        let logOutHeaders = {
+                            'X-Emby-Authorization': `MediaBrowser Client="Jellyfin Web", Device="Monkey", DeviceId="34098154309854132098", Version="10.8.8", Token=` + accessToken
+                        }
+                        result = await postData(logOutUrl, logOutHeaders, '', 'POST');
+                        console.log("Log Out");
+                        console.log(result);
+                        //console.log(ApiClient.getSessions());
+                    }
+
+                    /*
+              // Stop Playing when MPC goes away
+              async function stopPlaying(){
+                  let playUrl = "http://" + jellyfinUrl + ":8096/Users/" + userid + "/PlayingItems/" + itemid;
+                  let playHeaders = {
+                      'Content-Type': 'application/json',
+                      'X-Emby-Authorization': `MediaBrowser Client="Jellyfin Web", Device="Firefox", DeviceId="34098154309854132098", Version="10.8.8"`,
+                      'x-mediabrowser-token': accessToken
+                  }
+                  let playData = {
+                      "mediaSourceId": itemid,
+                      "audioStreamIndex": 1,
+                      "subtitleStreamIndex": 0,
+                      "playMethod": "DirectStream",
+                      "playSessionId": 83837459283798792,
+                      "canSeek": true
+                  };
+                  result = await postData(playUrl, playHeaders, playData, 'DELETE');
+                  console.log("Stop Playing");
+                  console.log(result);
+                  //console.log(ApiClient.getSessions());
+              }
+*/
+                    let isPaused = false;
+
+                    function mpcGM(path = '') {
+                        return new Promise((resolve, reject) => {
+                            GM.xmlHttpRequest({
+                                method: "GET",
+                                timeout: 2000,
+                                url:   "http://localhost:13579/status.html",
+                                headers: { "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:108.0) Gecko/20100101 Monkey/108.0" },
+
+                                onload: function(response) {
+
+                                    response = response.responseText.replace("OnStatus(", "");
+                                    response = response.replace(/\"/g, "");
+                                    response = response.replace(/\)$/, "");
+                                    //console.log(response);
+                                    mpcProgress = response.split(', ');
+                                    console.log("MPC reported played time: " + msToTime(mpcProgress[2]));
+                                    //console.log(mpcProgress);
+                                    if (mpcProgress[8] == durl && mpcProgress[2] > 0) {
+                                        positionTicks = mpcProgress[2]*10000;
+                                        setJellyfinProgress(positionTicks);
+                                        isPaused = mpcProgress[1] == "Paused" ? true : false;
+                                        console.log("Paused: " + isPaused);
+                                        resolve("test resolve");
+                                    } else {
+                                        console.log("Paths don't match");
+                                        resolve("resolve fail")
+                                        mpcLoop(true);
+                                    }
+                                },
+                                onerror: () => {
+                                    reject('Something wrong')
+                                },
+                                ontimeout: () => {
+                                    reject('Something wrong')
+                                }
+                            });
+                        });
+                    }
+
+                    let timeOutVar = {};
+
+                    function mpcLoop(terminator = false) {
+                        if(terminator) {
+                            clearTimeout(timeOutVar);
+                            console.log("terminated");
+                            callTasks();
+                            //stopPlaying();
+                            //logOut();
+                        } else {
+                            timeOutVar = setTimeout(() => {
+                                mpcGM(path)
+                                    .then((data) => {
+                                    console.log("promise resolved", data);
+                                })
+                                    .catch((err) => {
+                                    console.log("promise rejected", err);
+                                    mpcLoop(true);
+                                });
+                                console.log("continue")
+                                mpcLoop(false);
+                            }, 5000);
+                        }
+
+                    }
+
+                    mpcLoop(false);
+
+
+                    function download(filename, text) {
+                        var element = document.createElement('a');
+                        element.setAttribute('href', 'data:audio/x-mpequrl;charset=utf-8,' + encodeURIComponent(text));
+                        element.setAttribute('download', filename);
+                        element.style.display = 'none';
+                        document.body.appendChild(element);
+                        // firefox doesn't support `a.click()`...
+                        element.dispatchEvent(new MouseEvent('click'));
+
+                        document.body.removeChild(element);
+
+                    }
+
+                    download("mpc-playlist.m3u", durl);
+                    /*
+              setInterval( function() {
+                  let target = document.querySelectorAll(".itemsContainer")[1];
+
+                  let observer = new MutationObserver(function(mutations) {
+                      mutations.forEach(function(mutation) {
+                          bindEvent();
+                          console.log("MUTATION!!!!!!!!!!   " + mutation.type);
+                      });
+                  });
+                  // configuration of the observer:
+                  let config = { attributes: true, childList: true, characterData: true };
+
+                  // pass in the target node, as well as the observer options
+                  observer.observe(target, config);
+              }, 10000);
+*/
+                    setInterval( function() {
+                        let targets = document.querySelectorAll(".itemsContainer");
+                        for (let target of targets) {
+                            //console.log(target);
+                            let observer = new MutationObserver(function(mutations) {
+                                mutations.forEach(function(mutation) {
+                                    bindEvent();
+                                    console.log("MUTATION!!!!!!!!!!   " + mutation.type);
+                                });
+                            });
+                            // configuration of the observer:
+                            let config = { attributes: true, childList: true, characterData: true };
+
+                            // pass in the target node, as well as the observer options
+                            observer.observe(target, config);
+                        }
+                    }, 10000);
+
+
+                };
+
+
+                main();
+
+
+            } else {
+                ApiClient.getItems(userid, itemid).then(r => openPotplayer(r.Items[0].Id));
+            }
+        })
+    };
+
+    let bindEvent = async () => {
+        let buttons = [];
+        let retry = 6 + 1;
+        while (buttons.length == 0 && retry > 0) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            buttons = document.querySelectorAll('[data-mode=play],[data-mode=resume],[data-action=resume]');
+            retry -= 1;
+        }
+        for (let button of buttons) {
+            let nextElementSibling = button.nextElementSibling;
+            let parentElement = button.parentElement;
+            let outerHTML = button.outerHTML;
+            button.parentElement.removeChild(button);
+            let newButton = document.createElement('button');
+            if (nextElementSibling) {
+                parentElement.insertBefore(newButton, nextElementSibling);
+            } else {
+                parentElement.append(newButton);
+            }
+            newButton.outerHTML = outerHTML;
+        }
+        buttons = document.querySelectorAll('[data-mode=play],[data-mode=resume]');
+        for (let button of buttons) {
+            button.removeAttribute('data-mode');
+            button.addEventListener('click', e => {
+                e.stopPropagation();
+                let itemid = /id=(.*?)&serverId/.exec(window.location.hash)[1];
+                openPotplayer(itemid);
+            });
+        }
+        buttons = document.querySelectorAll('[data-action=resume]');
+        for (let button of buttons) {
+            button.removeAttribute('data-action');
+            button.addEventListener('click', e => {
+                e.stopPropagation();
+                let item = e.target;
+                while (!item.hasAttribute('data-id')) { item = item.parentNode }
+                let itemid = item.getAttribute('data-id');
+                openPotplayer(itemid);
+            });
+        }
+    };
+
+    let lazyload = () => {
+        let items = document.querySelectorAll('[data-src].lazy');
+        let y = document.scrollingElement.scrollTop;
+        let intersectinglist = [];
+        for (let item of items) {
+            let windowHeight = document.body.offsetHeight;
+            let itemTop = item.getBoundingClientRect().top;
+            let itemHeight = item.offsetHeight;
+            if (itemTop + itemHeight >= 0 && itemTop <= windowHeight) {
+                intersectinglist.push(item);
+            }
+        }
+        for (let item of intersectinglist) {
+            item.style.setProperty('background-image', `url("${item.getAttribute('data-src')}")`);
+            item.classList.remove('lazy');
+            item.removeAttribute('data-src');
+        };
+    };
+
+    window.addEventListener('scroll', lazyload);
+
+    window.addEventListener('viewshow', async() => {
+        bindEvent()});
+    window.addEventListener('hashchange', bindEvent());
+
+
+    window.onerror = function (errorMsg, url, lineNumber, column, errorObj) {
+        alert('Error: ' + errorMsg + ' Script: ' + url + ' Line: ' + lineNumber
+              + ' Column: ' + column + ' StackTrace: ' + errorObj);
+    };
+
+})
+();
