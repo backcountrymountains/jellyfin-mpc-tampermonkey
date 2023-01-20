@@ -1,0 +1,359 @@
+// ==UserScript==
+// @name         Jellyfin MPC Api Calls
+// @version      0.1
+// @description  play video with MPC-HC
+// @author       me
+// @match        http://192.168.x.x/web/index.html*
+// @match        http://localhost:8096/web/index.html*
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    //Jellyfin Username:
+    let username = "USERNAME";
+    //Jellyfin Password:
+    let password = "PASSWORD";
+    //How long to wait for MPC to open from m3u download before sending it commands and polling it
+    let mpcOpeningWaitTime = 2000;
+
+    //This shoudl work to set the jellyfin URL
+    let jellyfinUrl = window.location.host
+
+
+    //let status = '';
+    let accessToken = '';
+    let playedTime = '';
+    let playedTicks = 0;
+    var positionTicks = 0;
+    let isPaused = false;
+    var userid = '';
+    var itemid = '';
+    let markedAsPlayed = false;
+
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    function msToTime(s) {
+        var ms = s % 1000;
+        s = (s - ms) / 1000;
+        var secs = s % 60;
+        s = (s - secs) / 60;
+        var mins = s % 60;
+        var hrs = (s - mins) / 60;
+
+        return ('0'+hrs).substr(-2) + ':' + ('0'+mins).substr(-2) + ':' + ('0'+secs).substr(-2) + '.' + ms;
+    }
+
+
+    //MPC Functions
+    //Set MPC Player Position
+    async function mpcSetPosition(url = '') {
+        console.log(url);
+        console.log(playedTicks);
+        if (playedTicks > 10000) {
+            console.log(playedTime);
+            let response = await fetch(url);
+            let status = await response.text();
+        }
+        return status;
+    };
+
+    async function mpcStatus(durl) {
+        console.log("mpcStatus durl:" + durl);
+        let response = await fetch("http://localhost:13579/status.html").catch((e) => {
+            console.log("Fetch Error: Ending Session and Logging Out");
+            stopPlaying()
+                .catch(console.error);
+        });
+        let status = await response.text().catch((e) => { console.log("Error: no response from fetch"); });
+
+        status = status.replace(/OnStatus|\"|\(|\)/g, "");
+
+        let mpcProgress = status.split(', ');
+        console.log("MPC reported played time: " + msToTime(mpcProgress[2]));
+        if (mpcProgress[8] == durl) {
+            positionTicks = mpcProgress[2]*10000;
+            isPaused = mpcProgress[1] == "Paused" ? true : false;
+            console.log("Paused: " + isPaused);
+                console.log("About to set Jellyfin Progress");
+                setJellyfinProgress(positionTicks);
+                updateView();
+            console.log(mpcProgress[2]/mpcProgress[4]);
+            if (mpcProgress[2]/mpcProgress[4] > 0.92){
+                markAsPlayed();
+            };
+
+            wait(4000)
+                .then(() => mpcStatus(durl));
+
+        } else {
+            console.log("Paths don't match: Not updating Jellyfin", '\n', "Download Url: " + durl, '\n',"MPC Reported: " + mpcProgress[8] );
+        }
+
+    return status;
+    }
+
+    // Jellyfin Functions
+    // Post Data to Jellyfin
+    async function postData(url = '', headers = '', data = {}, method = '') {
+        const response = await fetch(url, {
+            method: method, // *GET, POST, PUT, DELETE, etc.
+            mode: 'cors', // no-cors, *cors, same-origin
+            cache: 'no-cache', // *default, no-cache, reload, force-cache, only-if-cached
+            credentials: 'omit', // include, *same-origin, omit
+            headers: headers,
+            redirect: 'follow', // manual, *follow, error
+            referrerPolicy: 'no-referrer', // no-referrer, *no-referrer-when-downgrade, origin, origin-when-cross-origin, same-origin, strict-origin, strict-origin-when-cross-origin, unsafe-url
+            body: JSON.stringify(data) // body data type must match "Content-Type" header
+        });
+        return response;
+    };
+    // Get authorization
+    async function getAuth() {
+        console.log("Getting Jellyfin accessToken");
+        let authUrl = "http://" + jellyfinUrl + "/Users/AuthenticateByName";
+        let authHeaders = {
+            'Content-Type': 'application/json',
+            'X-Emby-Authorization': `MediaBrowser Client="Jellyfin Web", Device="Monkey", DeviceId="34098154309854132098", Version="10.8.8"`
+        };
+        let authData = {
+            "Username": username,
+            "Pw": password
+        };
+        const response = await postData(authUrl, authHeaders, authData, 'POST')
+        .then((postResponse) => postResponse.json())
+        .then((data) => {
+            accessToken = data.AccessToken
+            console.log("Got the accessToken: " + accessToken);
+        });
+        return accessToken
+    }
+    // Tell Jellyfin we have started playing
+    async function startPlaying() {
+        console.log("Tell Jellyfin we have started playing with token: " + accessToken);
+        console.log("Item id: " + itemid);
+        console.log("User id: " + userid);
+        const url = ApiClient.getUrl('Sessions/Playing');
+        ApiClient.ajax({
+            type: 'POST',
+            data: JSON.stringify({
+                //"mediaSourceId": itemid,
+                "ItemId": itemid,
+                "mediaSourceId": "0d95b71b98008d81135a774a959fcfb2",
+                "audioStreamIndex": 1,
+                "subtitleStreamIndex": 0,
+                "playMethod": "DirectStream",
+                "playSessionId": 83837459283798792,
+                "canSeek": true
+
+            }),
+            contentType: 'application/json',
+            url: url
+        });
+        return
+    }
+    //Send progress info to Jellyfin
+    async function setJellyfinProgress(positionTicks) {
+        // NOOOOOOOOO: let progressUrl = "http://localhost:8096/Users/" + userid + "/PlayingItems/" + itemid + "/Progress";
+        console.log("Setting Progress");
+        const url = ApiClient.getUrl('Sessions/Playing/Progress');
+        ApiClient.ajax({
+            type: 'POST',
+            data: JSON.stringify({
+                "PositionTicks": positionTicks,
+                "ItemId": itemid,
+                "isPaused": isPaused,
+                "EventName": "timeupdate"
+            }),
+            contentType: 'application/json',
+            url: url
+        });
+        return
+    }
+    //Mark an Item as played
+    async function markAsPlayed(){
+        console.log("Marked as played: " + markedAsPlayed);
+        if (!markedAsPlayed){
+            markedAsPlayed = true;
+            const d = new Date();
+            console.log(itemid + " Marking as played at: " + d.toISOString())
+            const options = {};
+            options.DatePlayed = ApiClient.getDateParamValue(d);
+            const url = ApiClient.getUrl(`Users/${userid}/PlayedItems/${itemid}`, options);
+            return ApiClient.ajax({
+                type: 'POST',
+                url,
+                dataType: 'json'
+            });
+            if (window.location.hash === "#!/home.html"){
+                //This is the "Next Up" item container
+                let itemsContainer = document.querySelectorAll('[data-monitor="videoplayback,markplayed"]')[1];
+                wait(1000)
+                .then(itemsContainer.notifyRefreshNeeded(true));
+            }
+        }
+    }
+    //Tell Jellyfin we have stopped playing
+    async function stopPlaying(){
+        ApiClient.ajax({
+            type: 'POST',
+            data: JSON.stringify({
+                "PositionTicks": positionTicks,
+                "ItemId": itemid
+            }),
+            contentType: 'application/json',
+            url: ApiClient.getUrl('Sessions/Playing/Stopped')
+        });
+        console.log("Stop Playing");
+        return
+    }
+
+    //Download the m3u file
+    async function download(filename, text) {
+        var element = document.createElement('a');
+        element.setAttribute('href', 'data:audio/x-mpequrl;charset=utf-8,' + encodeURIComponent(text));
+        element.setAttribute('download', filename);
+        element.style.display = 'none';
+        document.body.appendChild(element);
+        // firefox doesn't support `a.click()`...
+        element.dispatchEvent(new MouseEvent('click'));
+
+        document.body.removeChild(element);
+
+    }
+    //This should update the jellyfin homepage to reflect playing status
+    async function updateView(){
+        console.log("Updating View");
+        if (window.location.hash === "#!/home.html"){
+            //This is the "Continue Watching" item container
+            let itemsContainer = document.querySelectorAll('[data-monitor="videoplayback,markplayed"]')[0];
+            itemsContainer.notifyRefreshNeeded(true)
+        }
+    }
+    let openMPC = async (itemid) => {
+        userid = (await ApiClient.getCurrentUser()).Id;
+        ApiClient.getItem(userid, itemid)
+            .then(r => {
+            if (r.Path) {
+                let path = r.Path.replace(/\\/g, '/');
+                path = path.replace('\/mnt\/d', 'D:');
+                let encodedPath = encodeURIComponent(path);
+                playedTicks = r.UserData.PlaybackPositionTicks/10000;
+                playedTime = msToTime(playedTicks);
+                console.log("Jellyfin reported played time: " + playedTime);
+                let durl = ApiClient.getItemDownloadUrl(itemid);
+                console.log("Download Url: " + durl);
+                markedAsPlayed = false;
+                console.log(ApiClient._serverInfo.AccessToken);
+
+
+                //Simultaneously Download m3u and perform login to jellyfin
+                download("mpc-playlist.m3u", durl)
+                    .then(() => wait(mpcOpeningWaitTime))
+                //Download the m3u, then set the position in MPC
+                    .then(() => mpcSetPosition('http://localhost:13579/command.html?wm_command=-1&position=' + playedTime))
+                //Make MPC fullscreen
+                    .then(() => fetch('http://localhost:13579/command.html?wm_command=830'))
+                    .catch(console.error);
+
+                startPlaying()
+                    .then(() => wait(5000))
+                    .then(() => mpcStatus(durl))
+                    .catch(console.error);
+
+                //Wait until everything is loaded and then watch itemsContainers for changes
+                setInterval( function() {
+                    let targets = document.querySelectorAll(".itemsContainer");
+                    for (let target of targets) {
+                        let observer = new MutationObserver(function(mutations) {
+                            mutations.forEach(function(mutation) {
+                                bindEvent();
+                                console.log("MUTATION!!!!!!!!!!   " + mutation.type);
+                            });
+                        });
+                        // configuration of the observer:
+                        let config = { attributes: true, childList: true, characterData: true };
+
+                        // pass in the target node, as well as the observer options
+                        observer.observe(target, config);
+                    }
+                }, 10000);
+
+            }
+        })
+    };
+
+//Button Futzing stuff
+    let bindEvent = async () => {
+        let buttons = [];
+        let retry = 6 + 1;
+        //slowly gather all of the buttons we need to modify
+        while (buttons.length == 0 && retry > 0) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            buttons = document.querySelectorAll('[data-action=resume],[data-action=play]');
+            retry -= 1;
+        }
+        //delete the button and make an identical replacement button (to get rid of event listeners?)
+        for (let button of buttons) {
+            let nextElementSibling = button.nextElementSibling;
+            let parentElement = button.parentElement;
+            let outerHTML = button.outerHTML;
+            button.parentElement.removeChild(button);
+            let newButton = document.createElement('button');
+            if (nextElementSibling) {
+                parentElement.insertBefore(newButton, nextElementSibling);
+            } else {
+                parentElement.append(newButton);
+            }
+            newButton.outerHTML = outerHTML;
+        }
+        //Get all of the relevant buttons and add our own event listener
+        buttons = document.querySelectorAll('[data-action=resume],[data-action=play]');
+        for (let button of buttons) {
+            button.removeAttribute('data-action');
+            button.addEventListener('click', e => {
+                e.stopPropagation();
+                let item = e.target;
+                while (!item.hasAttribute('data-id')) { item = item.parentNode }
+                let isSeriesFolder = item.getAttribute('data-isfolder');
+                itemid = item.getAttribute('data-id');
+                if (isSeriesFolder !== 'true') {
+                    openMPC(itemid);
+                }
+            });
+        }
+
+        //remove detailButton: This stops bad behavior on item info pages but breaks live streaming tuner channel pages
+        buttons = document.querySelectorAll('[class="button-flat btnPlay detailButton emby-button"],[class="button-flat btnReplay detailButton emby-button"]')
+        for (let button of buttons) {
+            button.parentElement.removeChild(button);
+        }
+    };
+
+    //No idea really. Something to get buttons as they load while scrolling?
+    let lazyload = () => {
+        let items = document.querySelectorAll('[data-src].lazy');
+        let y = document.scrollingElement.scrollTop;
+        let intersectinglist = [];
+        for (let item of items) {
+            let windowHeight = document.body.offsetHeight;
+            let itemTop = item.getBoundingClientRect().top;
+            let itemHeight = item.offsetHeight;
+            if (itemTop + itemHeight >= 0 && itemTop <= windowHeight) {
+                intersectinglist.push(item);
+            }
+        }
+        for (let item of intersectinglist) {
+            item.style.setProperty('background-image', `url("${item.getAttribute('data-src')}")`);
+            item.classList.remove('lazy');
+            item.removeAttribute('data-src');
+        };
+    };
+
+    window.addEventListener('scroll', lazyload);
+
+    window.addEventListener('viewshow', async() => {
+        bindEvent();
+        window.addEventListener('hashchange', bindEvent);
+    });
+})
+();
